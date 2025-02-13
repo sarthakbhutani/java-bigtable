@@ -49,6 +49,47 @@ import javax.annotation.Nullable;
 public final class RowSetUtil {
   private RowSetUtil() {}
 
+  public static RowSet createSplitRanges(
+      RowSet rowSet, ByteString excludePoint, boolean fromStart) {
+    RowSet.Builder newRowSet = RowSet.newBuilder();
+
+    if (rowSet.getRowKeysList().isEmpty() && rowSet.getRowRangesList().isEmpty()) {
+      // querying range (, excludePoint) and (excludePoint, )
+      newRowSet.addRowRanges(RowRange.newBuilder().setEndKeyOpen(excludePoint).build());
+      newRowSet.addRowRanges(RowRange.newBuilder().setStartKeyOpen(excludePoint).build());
+    }
+
+    // Handle point lookups
+    for (ByteString key : rowSet.getRowKeysList()) {
+      if (fromStart) {
+        // key is right of the split
+        if (ByteStringComparator.INSTANCE.compare(key, excludePoint) > 0) {
+          newRowSet.addRowKeys(key);
+        }
+      } else {
+        // key is left of the split
+        if (ByteStringComparator.INSTANCE.compare(key, excludePoint) < 0) {
+          newRowSet.addRowKeys(key);
+        }
+      }
+    }
+
+    // Handle ranges
+    for (RowRange rowRange : rowSet.getRowRangesList()) {
+      List<RowRange> newRangeCollection = splitRange(rowRange, excludePoint, fromStart);
+      if (newRangeCollection != null && !newRangeCollection.isEmpty()) {
+        for (RowRange newRange : newRangeCollection) {
+          newRowSet.addRowRanges(newRange);
+        }
+      }
+    }
+    RowSet result = newRowSet.build();
+    if (result.getRowKeysList().isEmpty() && result.getRowRangesList().isEmpty()) {
+      return null;
+    }
+    return result;
+  }
+
   /**
    * Removes all the keys and range parts that fall on or before the splitPoint.
    *
@@ -123,6 +164,67 @@ public final class RowSetUtil {
     }
 
     return newRange.build();
+  }
+
+  public static List<RowRange> splitRange(RowRange range, ByteString split, boolean fromStart) {
+    List<RowRange> rowRangesList = new ArrayList<RowRange>();
+
+    if (fromStart) {
+      // range end is on or left of the split: skip
+      if (EndPoint.extract(range).compareTo(new EndPoint(split, true)) < 0) {
+        rowRangesList.add(range);
+        return rowRangesList;
+      }
+    } else {
+      // range is on or right of the split
+      if (StartPoint.extract(range).compareTo(new StartPoint(split, true)) > 0) {
+        rowRangesList.add(range);
+        return rowRangesList;
+      }
+      // either set = or set the range's start & end key acc to you
+    }
+
+    if (fromStart) {
+      // range start is on or left of the split
+      if (StartPoint.extract(range).compareTo(new StartPoint(split, true)) < 0) {
+        RowRange beforeSplitKeyRange =
+            range
+                .toBuilder()
+                .setStartKeyOpen(
+                    range.getStartKeyOpen().isEmpty()
+                        ? range.getStartKeyClosed()
+                        : range.getStartKeyOpen())
+                .setEndKeyOpen(split)
+                .build();
+        rowRangesList.add(beforeSplitKeyRange);
+        // RowRange afterSplitKeyRange = range.toBuilder().setStartKeyOpen(split).build();
+      }
+      if (EndPoint.extract(range).compareTo(new EndPoint(split, true)) > 0) {
+        RowRange afterSplitKeyRange = range.toBuilder().setStartKeyOpen(split).build();
+        rowRangesList.add(afterSplitKeyRange);
+      }
+    } else {
+      // range end is on or right of the split
+      if (EndPoint.extract(range).compareTo(new EndPoint(split, true)) > 0) {
+        // end key open would be already present as large read success key
+        RowRange afterSplitKeyRange =
+            range
+                .toBuilder()
+                .setStartKeyOpen(split)
+                .setEndKeyOpen(
+                    range.getEndKeyOpen().isEmpty()
+                        ? range.getEndKeyClosed()
+                        : range.getEndKeyOpen())
+                .build();
+        rowRangesList.add(afterSplitKeyRange);
+      }
+      if (StartPoint.extract(range).compareTo(new StartPoint(split, true)) < 0) {
+        RowRange beforeSplitKeyRange = range.toBuilder().setEndKeyOpen(split).build();
+        rowRangesList.add(beforeSplitKeyRange);
+      }
+    }
+
+    return rowRangesList;
   }
 
   /**
